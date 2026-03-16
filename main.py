@@ -39,18 +39,53 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 # ── Nominatim geocode ─────────────────────────────────────────────────────────
 async def geocode(client: httpx.AsyncClient, place: str) -> tuple[float, float] | None:
+    from urllib.parse import quote
+
+    # Try TomTom with India bias (center of India lat/lon)
+    try:
+        r = await client.get(
+            f"https://api.tomtom.com/search/2/geocode/{quote(place)}.json",
+            params={
+                "key": settings.tomtom_key,
+                "limit": 5,                  # get multiple results
+                "countrySet": "IN",          # restrict to India only
+                "lat": 20.5937,              # bias center: India
+                "lon": 78.9629,
+                "radius": 500000            # 500km radius bias
+            },
+            timeout=10.0
+        )
+        data = r.json()
+        if data.get("results"):
+            pos = data["results"][0]["position"]
+            print(f"✅ TomTom geocode '{place}': {pos['lat']}, {pos['lon']}")
+            return float(pos["lat"]), float(pos["lon"])
+    except Exception as e:
+        print(f"TomTom geocode error for '{place}': {e}")
+
+    # Fallback: Nominatim with India bias
     try:
         r = await client.get(
             "https://nominatim.openstreetmap.org/search",
-            params={"format": "json", "q": place, "limit": 1},
-            headers={"User-Agent": "FuelMapFastAPI/1.0"},
+            params={
+                "format": "json",
+                "q": place,
+                "limit": 1,
+                "countrycodes": "in",        # restrict to India
+                "viewbox": "68.1,8.4,97.4,37.6",  # India bounding box
+                "bounded": 1
+            },
+            headers={"User-Agent": "FuelMapApp/1.0 (contact@fuelmap.app)"},
             timeout=10.0
         )
         data = r.json()
         if data:
+            print(f"✅ Nominatim geocode '{place}': {data[0]['lat']}, {data[0]['lon']}")
             return float(data[0]["lat"]), float(data[0]["lon"])
     except Exception as e:
-        print(f"Geocode error for '{place}': {e}")
+        print(f"Nominatim geocode error for '{place}': {e}")
+
+    print(f"❌ Could not geocode: '{place}'")
     return None
 
 # ── TomTom reverse geocode ────────────────────────────────────────────────────
@@ -74,8 +109,10 @@ async def tomtom_route(
 ) -> dict | None:
     try:
         wp_str = ":".join(f"{lat},{lon}" for lat, lon in waypoints)
+        url = f"https://api.tomtom.com/routing/1/calculateRoute/{wp_str}/json"
+        print(f"🗺️  TomTom route URL: {url}")
         r = await client.get(
-            f"https://api.tomtom.com/routing/1/calculateRoute/{wp_str}/json",
+            url,
             params={
                 "traffic": "true",
                 "instructionsType": "text",
@@ -83,8 +120,11 @@ async def tomtom_route(
             },
             timeout=15.0
         )
+        print(f"🗺️  TomTom status: {r.status_code}")
         data = r.json()
+        print(f"🗺️  TomTom response keys: {list(data.keys())}")
         if not data.get("routes"):
+            print(f"❌ TomTom no routes. Full response: {data}")
             return None
 
         route = data["routes"][0]
@@ -105,7 +145,34 @@ async def tomtom_route(
                 "icon": _direction_icon(maneuver)
             })
 
-        return {"dist_km": dist_km, "dur_min": dur_min, "directions": directions}
+        # Extract polyline from TomTom legs.points as fallback
+        tt_polyline = []
+        for leg in route.get("legs", []):
+            for pt in leg.get("points", []):
+                tt_polyline.append({"lat": pt["latitude"], "lng": pt["longitude"]})
+
+        # Simplify TomTom polyline (keep every Nth point, max 150 points)
+        def simplify(points, max_pts=150):
+            if len(points) <= max_pts:
+                return points
+            step = max(1, len(points) // max_pts)
+            simplified = points[::step]
+            # Always keep last point
+            if simplified[-1] != points[-1]:
+                simplified.append(points[-1])
+            return simplified
+
+        tt_polyline_simplified = simplify(tt_polyline)
+
+        # Keep only first 30 directions (enough for turn-by-turn)
+        directions = directions[:30]
+
+        return {
+            "dist_km": dist_km,
+            "dur_min": dur_min,
+            "directions": directions,
+            "tt_polyline": tt_polyline_simplified
+        }
     except Exception as e:
         print(f"TomTom route error: {e}")
         return None
@@ -138,7 +205,14 @@ async def osrm_polyline(
         data = r.json()
         if data.get("code") == "Ok":
             coords = data["routes"][0]["geometry"]["coordinates"]
-            return [{"lat": c[1], "lng": c[0]} for c in coords]
+            all_pts = [{"lat": c[1], "lng": c[0]} for c in coords]
+            # Limit to 150 points max
+            if len(all_pts) > 150:
+                step = max(1, len(all_pts) // 150)
+                all_pts = all_pts[::step]
+                if all_pts[-1] != {"lat": coords[-1][1], "lng": coords[-1][0]}:
+                    all_pts.append({"lat": coords[-1][1], "lng": coords[-1][0]})
+            return all_pts
     except Exception as e:
         print(f"OSRM error: {e}")
     # Fallback: straight line between waypoints
@@ -255,12 +329,21 @@ async def build_route_option(
     station: dict | None = None
 ) -> RouteOption | None:
     # Run TomTom + OSRM concurrently
-    tt_result, polyline = await asyncio.gather(
+    tt_result, osrm_poly = await asyncio.gather(
         tomtom_route(client, waypoints),
         osrm_polyline(client, waypoints)
     )
     if not tt_result:
+        print(f"❌ build_route_option: TomTom returned None for {waypoints}")
         return None
+
+    # Use OSRM polyline if available, otherwise fall back to TomTom points
+    if osrm_poly and len(osrm_poly) > 2:
+        polyline = osrm_poly
+        print(f"✅ Using OSRM polyline ({len(osrm_poly)} points)")
+    else:
+        polyline = tt_result.get("tt_polyline", [])
+        print(f"⚠️  OSRM failed, using TomTom polyline ({len(polyline)} points)")
 
     dist_km = tt_result["dist_km"]
     dur_min = tt_result["dur_min"]
