@@ -1,11 +1,12 @@
 services:
   - type: web
     name: fuelmap-route-planner
-    env: python
+    runtime: python
+    region: singapore
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: TOMTOM_KEY
-        sync: false          # set this in Render dashboard
+      - key: GOOGLE_MAPS_KEY
+        sync: false
       - key: FUEL_PRICE_PER_LITER
         value: "104.0"
