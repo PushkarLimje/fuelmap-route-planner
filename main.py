@@ -345,6 +345,102 @@ async def plan_route(req: RoutePlanRequest):
             needs_stop=needs_stop
         )
 
+
+@app.get("/geocode")
+async def geocode_place(place: str):
+    """Geocode a place name to coordinates — keeps Google key server-side"""
+    async with httpx.AsyncClient() as client:
+        coords = await geocode(client, place)
+        if not coords:
+            raise HTTPException(400, f"Could not find location: '{place}'")
+        return {"lat": coords[0], "lng": coords[1]}
+
+@app.get("/fuel-stations")
+async def get_fuel_stations(lat: float, lon: float, radius: int = 5000):
+    """Find nearby fuel stations — keeps Google key server-side"""
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(
+                f"{GMAPS}/place/nearbysearch/json",
+                params={
+                    "location": f"{lat},{lon}",
+                    "radius": min(radius, 10000),
+                    "type": "gas_station",
+                    "key": settings.google_maps_key,
+                },
+                timeout=10.0
+            )
+            data = r.json()
+            results = data.get("results", [])
+            stations = []
+            for place in results:
+                loc  = place["geometry"]["location"]
+                slat = loc["lat"]
+                slon = loc["lng"]
+                dist = haversine(lat, lon, slat, slon)
+                name = place.get("name", "Fuel Station")
+                stations.append({
+                    "id": place["place_id"],
+                    "name": name,
+                    "lat": slat,
+                    "lon": slon,
+                    "distance": f"{dist:.2f} km",
+                    "time": f"{round(dist / 40 * 60)} mins",
+                    "rating": place.get("rating", 0),
+                    "brand": _detect_brand(name),
+                })
+            stations.sort(key=lambda x: float(x["distance"].replace(" km", "")))
+            return {"stations": stations[:20]}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to find stations: {e}")
+
+@app.get("/charging-stations")
+async def get_charging_stations(lat: float, lon: float, radius: int = 5000):
+    """Find nearby EV charging stations — keeps Google key server-side"""
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(
+                f"{GMAPS}/place/nearbysearch/json",
+                params={
+                    "location": f"{lat},{lon}",
+                    "radius": min(radius, 10000),
+                    "type": "electric_vehicle_charging_station",
+                    "key": settings.google_maps_key,
+                },
+                timeout=10.0
+            )
+            data = r.json()
+            results = data.get("results", [])
+            stations = []
+            for place in results:
+                loc  = place["geometry"]["location"]
+                slat = loc["lat"]
+                slon = loc["lng"]
+                dist = haversine(lat, lon, slat, slon)
+                stations.append({
+                    "id": place["place_id"],
+                    "name": place.get("name", "EV Charging Station"),
+                    "lat": slat,
+                    "lon": slon,
+                    "distance": f"{dist:.2f} km",
+                    "time": f"{round(dist / 40 * 60)} mins",
+                    "rating": place.get("rating", 0),
+                })
+            stations.sort(key=lambda x: float(x["distance"].replace(" km", "")))
+            return {"stations": stations[:20]}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to find stations: {e}")
+
+def _detect_brand(name: str) -> str | None:
+    n = name.lower()
+    if "hp" in n or "hindustan" in n: return "HP"
+    if "iocl" in n or "indian oil" in n: return "Indian Oil"
+    if "bpcl" in n or "bharat" in n: return "BPCL"
+    if "reliance" in n: return "Reliance"
+    if "shell" in n: return "Shell"
+    if "nayara" in n or "essar" in n: return "Nayara"
+    return None
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "FuelMap Route Planner (Google Maps)"}
@@ -354,6 +450,409 @@ async def get_reverse_geocode(lat: float, lon: float):
     async with httpx.AsyncClient() as client:
         address = await reverse_geocode(client, lat, lon)
         return {"address": address}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# """
+# FuelMap Route Planning Microservice — Google Maps Edition
+# All APIs replaced with Google Maps:
+#   - Geocoding        → Google Geocoding API
+#   - Route/Polyline   → Google Directions API
+#   - Fuel Stations    → Google Places API (nearbysearch)
+#   - EV Stations      → Google Places API (nearbysearch)
+#   - Reverse Geocode  → Google Reverse Geocoding API
+# """
+#
+# from fastapi import FastAPI, HTTPException
+# from fastapi.middleware.cors import CORSMiddleware
+# import asyncio
+# import httpx
+# import math
+# import re
+# import polyline as polyline_decoder
+# from models import RoutePlanRequest, RoutePlanResponse, RouteOption, Station
+# from config import settings
+#
+# app = FastAPI(
+#     title="FuelMap Route Planner",
+#     description="Google Maps powered route planning microservice",
+#     version="2.0.0"
+# )
+#
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+#
+# GMAPS = "https://maps.googleapis.com/maps/api"
+#
+# # ── Haversine ─────────────────────────────────────────────────────────────────
+# def haversine(lat1, lon1, lat2, lon2) -> float:
+#     R = 6371.0
+#     dlat = math.radians(lat2 - lat1)
+#     dlon = math.radians(lon2 - lon1)
+#     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+#     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+#
+# # ── Google Geocoding ──────────────────────────────────────────────────────────
+# async def geocode(client: httpx.AsyncClient, place: str) -> tuple[float, float] | None:
+#     try:
+#         r = await client.get(
+#             f"{GMAPS}/geocode/json",
+#             params={
+#                 "address": place,
+#                 "key": settings.google_maps_key,
+#                 "region": "in",
+#                 "components": "country:IN"
+#             },
+#             timeout=10.0
+#         )
+#         data = r.json()
+#         if data.get("status") == "OK" and data.get("results"):
+#             loc = data["results"][0]["geometry"]["location"]
+#             print(f"✅ Geocode '{place}': {loc['lat']}, {loc['lng']}")
+#             return float(loc["lat"]), float(loc["lng"])
+#         print(f"❌ Geocode failed '{place}': {data.get('status')}")
+#     except Exception as e:
+#         print(f"Geocode error: {e}")
+#     return None
+#
+# # ── Google Reverse Geocoding ──────────────────────────────────────────────────
+# async def reverse_geocode(client: httpx.AsyncClient, lat: float, lon: float) -> str:
+#     try:
+#         r = await client.get(
+#             f"{GMAPS}/geocode/json",
+#             params={"latlng": f"{lat},{lon}", "key": settings.google_maps_key},
+#             timeout=8.0
+#         )
+#         data = r.json()
+#         if data.get("status") == "OK" and data.get("results"):
+#             return data["results"][0]["formatted_address"]
+#     except Exception as e:
+#         print(f"Reverse geocode error: {e}")
+#     return f"{lat:.6f}, {lon:.6f}"
+#
+# # ── Google Directions API ─────────────────────────────────────────────────────
+# async def google_route(
+#     client: httpx.AsyncClient,
+#     waypoints: list[tuple[float, float]]
+# ) -> dict | None:
+#     try:
+#         origin      = f"{waypoints[0][0]},{waypoints[0][1]}"
+#         destination = f"{waypoints[-1][0]},{waypoints[-1][1]}"
+#
+#         params = {
+#             "origin": origin,
+#             "destination": destination,
+#             "key": settings.google_maps_key,
+#             "mode": "driving",
+#             "language": "en",
+#             "region": "in",
+#         }
+#
+#         # Via waypoints for station routes
+#         if len(waypoints) > 2:
+#             params["waypoints"] = "|".join(f"{w[0]},{w[1]}" for w in waypoints[1:-1])
+#
+#         r = await client.get(f"{GMAPS}/directions/json", params=params, timeout=15.0)
+#         data = r.json()
+#
+#         if data.get("status") != "OK":
+#             print(f"❌ Directions failed: {data.get('status')} — {data.get('error_message', '')}")
+#             return None
+#
+#         route    = data["routes"][0]
+#         leg_data = route["legs"]
+#
+#         dist_km = sum(leg["distance"]["value"] for leg in leg_data) / 1000
+#         dur_min = round(sum(leg["duration"]["value"] for leg in leg_data) / 60)
+#
+#         # Decode Google's encoded polyline
+#         encoded = route["overview_polyline"]["points"]
+#         coords  = polyline_decoder.decode(encoded)  # [(lat, lng), ...]
+#
+#         # Simplify to max 150 points
+#         if len(coords) > 150:
+#             step   = max(1, len(coords) // 150)
+#             coords = coords[::step]
+#
+#         poly = [{"lat": c[0], "lng": c[1]} for c in coords]
+#
+#         # Turn-by-turn directions
+#         icon_map = {
+#             "turn-left": "↰", "turn-right": "↱",
+#             "turn-slight-left": "↰", "turn-slight-right": "↱",
+#             "turn-sharp-left": "↰", "turn-sharp-right": "↱",
+#             "keep-left": "↰", "keep-right": "↱",
+#             "straight": "↑", "merge": "↑",
+#             "roundabout-left": "⟲", "roundabout-right": "⟳",
+#             "uturn-left": "↶", "uturn-right": "↷",
+#         }
+#         directions = []
+#         for leg in leg_data:
+#             for step in leg.get("steps", [])[:15]:
+#                 maneuver    = step.get("maneuver", "straight")
+#                 instruction = re.sub(r'<[^>]+>', '', step.get("html_instructions", "Continue"))
+#                 directions.append({
+#                     "instruction": instruction,
+#                     "distance": step["distance"]["text"],
+#                     "icon": icon_map.get(maneuver, "↑")
+#                 })
+#
+#         print(f"✅ Route: {dist_km:.1f}km, {dur_min}min, {len(poly)} pts, {len(directions)} steps")
+#         return {
+#             "dist_km": dist_km,
+#             "dur_min": dur_min,
+#             "poly": poly,
+#             "directions": directions[:30]
+#         }
+#
+#     except Exception as e:
+#         print(f"❌ Directions error: {e}")
+#         return None
+#
+# # ── Google Places — Fuel Stations ─────────────────────────────────────────────
+# async def find_fuel_stations(client: httpx.AsyncClient, src: tuple, dst: tuple) -> list[dict]:
+#     try:
+#         mid_lat  = (src[0] + dst[0]) / 2
+#         mid_lon  = (src[1] + dst[1]) / 2
+#         route_dist = haversine(*src, *dst)
+#         radius   = min(int(route_dist * 500), 50000)
+#
+#         r = await client.get(
+#             f"{GMAPS}/place/nearbysearch/json",
+#             params={
+#                 "location": f"{mid_lat},{mid_lon}",
+#                 "radius": radius,
+#                 "type": "gas_station",
+#                 "key": settings.google_maps_key,
+#             },
+#             timeout=10.0
+#         )
+#         data     = r.json()
+#         results  = data.get("results", [])
+#         stations = []
+#
+#         for place in results:
+#             loc  = place["geometry"]["location"]
+#             slat, slon = loc["lat"], loc["lng"]
+#             total = haversine(*src, slat, slon) + haversine(slat, slon, *dst)
+#             if total <= route_dist * 1.3:
+#                 stations.append({
+#                     "name": place.get("name", "Fuel Station"),
+#                     "lat": slat, "lon": slon, "type": "fuel",
+#                     "rating": place.get("rating", 0)
+#                 })
+#
+#         stations.sort(key=lambda x: x["rating"], reverse=True)
+#         print(f"✅ {len(stations)} fuel stations found")
+#         return stations[:3]
+#     except Exception as e:
+#         print(f"Fuel stations error: {e}")
+#         return []
+#
+# # ── Google Places — EV Charging Stations ──────────────────────────────────────
+# async def find_charging_stations(client: httpx.AsyncClient, src: tuple, dst: tuple) -> list[dict]:
+#     try:
+#         mid_lat  = (src[0] + dst[0]) / 2
+#         mid_lon  = (src[1] + dst[1]) / 2
+#         route_dist = haversine(*src, *dst)
+#         radius   = min(int(route_dist * 600), 50000)
+#
+#         r = await client.get(
+#             f"{GMAPS}/place/nearbysearch/json",
+#             params={
+#                 "location": f"{mid_lat},{mid_lon}",
+#                 "radius": radius,
+#                 "type": "electric_vehicle_charging_station",
+#                 "key": settings.google_maps_key,
+#             },
+#             timeout=10.0
+#         )
+#         data     = r.json()
+#         results  = data.get("results", [])
+#         stations = []
+#
+#         for place in results:
+#             loc  = place["geometry"]["location"]
+#             slat, slon = loc["lat"], loc["lng"]
+#             total = haversine(*src, slat, slon) + haversine(slat, slon, *dst)
+#             if total <= route_dist * 1.3:
+#                 stations.append({
+#                     "name": place.get("name", "EV Charging Station"),
+#                     "lat": slat, "lon": slon, "type": "charging",
+#                     "rating": place.get("rating", 0)
+#                 })
+#
+#         stations.sort(key=lambda x: x["rating"], reverse=True)
+#         print(f"✅ {len(stations)} EV stations found")
+#         return stations[:3]
+#     except Exception as e:
+#         print(f"EV stations error: {e}")
+#         return []
+#
+# # ── Build one route option ────────────────────────────────────────────────────
+# async def build_route_option(
+#     client, route_id, route_type, waypoints,
+#     vehicle_type, mileage, range_per_kwh, station=None
+# ) -> RouteOption | None:
+#
+#     result = await google_route(client, waypoints)
+#     if not result:
+#         return None
+#
+#     dist_km = result["dist_km"]
+#     dur_min = result["dur_min"]
+#
+#     if vehicle_type == "petrol":
+#         energy    = dist_km / mileage if mileage else 0
+#         unit      = "L"
+#         fuel_cost = round(energy * settings.fuel_price_per_liter, 2)
+#     else:
+#         energy    = dist_km / range_per_kwh if range_per_kwh else 0
+#         unit      = "kWh"
+#         fuel_cost = 0.0
+#
+#     h, m = divmod(dur_min, 60)
+#     duration_str = f"{h}h {m}m" if h > 0 else f"{m} mins"
+#
+#     return RouteOption(
+#         id=route_id,
+#         type=route_type,
+#         distance_km=round(dist_km, 2),
+#         duration_min=dur_min,
+#         duration_str=duration_str,
+#         energy_required=round(energy, 2),
+#         energy_unit=unit,
+#         fuel_cost=fuel_cost,
+#         waypoints=[{"lat": lat, "lng": lon} for lat, lon in waypoints],
+#         path_coordinates=result["poly"],
+#         directions=result["directions"],
+#         station=Station(**station) if station else None
+#     )
+#
+# # ── Main endpoint ─────────────────────────────────────────────────────────────
+# @app.post("/routes/plan", response_model=RoutePlanResponse)
+# async def plan_route(req: RoutePlanRequest):
+#     async with httpx.AsyncClient() as client:
+#
+#         # Geocode in parallel
+#         src_coords, dst_coords = await asyncio.gather(
+#             geocode(client, req.start),
+#             geocode(client, req.destination)
+#         )
+#
+#         if not src_coords:
+#             raise HTTPException(400, f"Could not find: '{req.start}'")
+#         if not dst_coords:
+#             raise HTTPException(400, f"Could not find: '{req.destination}'")
+#
+#         mileage       = req.mileage or 15.0
+#         range_per_kwh = req.range_per_kwh or 6.0
+#         available     = req.fuel if req.vehicle_type == "petrol" else req.current_charge
+#
+#         # Direct route
+#         direct = await build_route_option(
+#             client, "direct", "Direct Route",
+#             [src_coords, dst_coords],
+#             req.vehicle_type, mileage, range_per_kwh
+#         )
+#         if not direct:
+#             raise HTTPException(500, "Could not calculate route. Please try again.")
+#
+#         options    = [direct]
+#         needs_stop = (available or 0) < direct.energy_required
+#
+#         if needs_stop:
+#             # Find stations
+#             if req.vehicle_type == "petrol":
+#                 stations = await find_fuel_stations(client, src_coords, dst_coords)
+#             else:
+#                 stations = await find_charging_stations(client, src_coords, dst_coords)
+#
+#             # Build via-station routes concurrently
+#             tasks = [
+#                 build_route_option(
+#                     client,
+#                     f"via-{s['name'].replace(' ', '_')[:20]}",
+#                     "Via Fuel Station" if req.vehicle_type == "petrol" else "Via Charging Station",
+#                     [src_coords, (s["lat"], s["lon"]), dst_coords],
+#                     req.vehicle_type, mileage, range_per_kwh,
+#                     station={"name": s["name"], "lat": s["lat"], "lon": s["lon"], "type": s["type"]}
+#                 )
+#                 for s in stations[:2]
+#             ]
+#             results = await asyncio.gather(*tasks)
+#             options.extend([r for r in results if r is not None])
+#
+#         options.sort(key=lambda r: r.distance_km)
+#
+#         return RoutePlanResponse(
+#             success=True,
+#             start=req.start,
+#             destination=req.destination,
+#             start_coords={"lat": src_coords[0], "lng": src_coords[1]},
+#             dest_coords={"lat": dst_coords[0], "lng": dst_coords[1]},
+#             vehicle_type=req.vehicle_type,
+#             routes=options,
+#             needs_stop=needs_stop
+#         )
+#
+# @app.get("/health")
+# async def health():
+#     return {"status": "ok", "service": "FuelMap Route Planner (Google Maps)"}
+#
+# @app.get("/reverse-geocode")
+# async def get_reverse_geocode(lat: float, lon: float):
+#     async with httpx.AsyncClient() as client:
+#         address = await reverse_geocode(client, lat, lon)
+#         return {"address": address}
 
 
 
