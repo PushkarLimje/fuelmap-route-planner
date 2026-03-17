@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     tomtom_key: str
+    google_maps_key: str
     fuel_price_per_liter: float = 104.0   # ₹ per litre
 
     class Config:
